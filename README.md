@@ -50,7 +50,7 @@ Install through the Arduino IDE Library Manager unless noted otherwise:
 This repository contains the firmware only. To reproduce the model:
 
 1. Create an Edge Impulse project and connect the Nano via the Edge Impulse CLI daemon (`edge-impulse-daemon`), which requires the Nano to be running Edge Impulse's own data-forwarding firmware rather than this sketch.
-2. Record samples for six classes: `light`, `dim`, `off`, `red`, `background` (ambient noise), and `unknown` (other speech, near-miss words). Crop each command sample to close to 1000ms, including a natural buffer of real recorded silence either side of the spoken word rather than trimming tightly, and rather than relying on Edge Impulse's automatic zero-padding to fill the gap.
+2. Record samples for six classes: `light`, `dim`, `off`, `red`, `background` (ambient noise, silence, music), and `unknown` (other speech, including near-miss words that sound close to a command, for example "slim", "dip", or "brim" against "dim"). Crop each command sample to close to 1000ms, including a natural buffer of real recorded silence either side of the spoken word rather than trimming tightly, and rather than relying on Edge Impulse's automatic zero-padding to fill the gap.
 3. Create an impulse with a 1000ms window and 125ms window increase (stride), an MFCC processing block, and a Classification (Keras) learning block.
 4. Generate features and train.
 5. In the Deployment tab, choose "Arduino library", Quantized (int8), and build. This downloads a zip containing the trained model as an Arduino library.
@@ -82,6 +82,19 @@ A few things learned the hard way while building this, in case they save time on
 - **Stride and memory are linked.** Reducing the window stride increases how many overlapping slices the model needs to process per window, which increases the scratch memory required for the sliding MFCC computation on-device. Pushing stride too low will fail outright with a scratch buffer allocation error rather than degrading gracefully. 125ms stride on a 1000ms window (8 slices) runs reliably on the Nano 33 BLE Sense; more aggressive settings weren't stable in testing.
 - **The 5V pin needs a solder jumper.** It's disabled by default on the Nano 33 BLE Sense. Without bridging it, wiring the matrix to that pin does nothing, and it can look like a wiring fault rather than a missing bridge.
 - **`while (!Serial)` blocks forever without a computer attached.** The original Edge Impulse example waits indefinitely for a serial connection before continuing, which is fine when a computer's plugged in for debugging but means the board never starts up when powered from a standalone supply. This sketch uses a timeout instead.
+
+## Experiment log: getting the window/stride balance right
+
+Roughly the order this actually happened in, kept here since the reasoning at each step matters as much as the final numbers:
+
+1. **Started with 500ms stride on a 1000ms window, using 2000ms recordings with generous silence either side.** This is what a first, un-cropped Edge Impulse keyword-spotting project looks like. Class separation was poor, most classes bled into `background` and into each other in the feature explorer, since the silence padding in every recording looked acoustically similar to the actual `background` class. Live accuracy was mediocre and somewhat prone to false triggers.
+2. **Cropped the command samples tightly, removing almost all silence around the spoken word.** This is the "as little silence either side as possible" instinct: less silence means less overlap with the `background` class in the training data. Feature explorer separation improved dramatically, offline validation accuracy jumped (light went from F1 0.46 to 1.00 on one pass). But on the actual hardware, this version performed noticeably worse: it rarely registered a command at all, and when it did, confidence was oddly binary (either very high or nothing).
+3. **Diagnosis: still using 500ms stride against recordings that were now only 400-600ms long**, well under the 1000ms window. This meant most training samples were mostly zero-padding, not real audio, which is the same background-overlap problem as step 1 but caused by padding rather than un-cropped silence.
+4. **Tried reducing stride from 500ms to ~100ms** to give the sliding window more chances to land well on the word. Better, but still not right, since the underlying zero-padding mismatch from step 3 hadn't been addressed.
+5. **Tried reducing window size from 1000ms to 600ms**, reasoning that a smaller window would need less padding to fill. This was worse, and also triggered a scratch buffer allocation crash at some window/stride combinations, since slice size interacts with the MFCC block's internal frame settings in ways that don't scale simply with "smaller window = less memory."
+6. **Went back and re-recorded every command clip to a consistent 1000ms, matching the window size exactly, with natural recorded silence rather than tight cropping or relying on zero-padding.** Window 1000ms, stride 125ms. This is the current, working configuration: it doesn't fire on background noise, radio, or music the way the very first version did, but it sometimes takes a couple of attempts to register an intended command. That trade-off (fewer false triggers, occasionally needing a repeat) is where this settled for a v1, rather than a fully solved problem.
+
+
 
 ## Licence
 
